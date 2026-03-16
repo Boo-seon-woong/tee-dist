@@ -1,0 +1,33 @@
+#ifndef TD_CONFIG_H
+#define TD_CONFIG_H
+
+#include "td_common.h"
+
+typedef struct {
+    td_mode_t mode;
+    td_transport_t transport;
+    int replication;
+    td_tdx_mode_t tdx;
+    td_cache_mode_t cache;
+    size_t mn_memory_size_mb;
+    char encryption_key_hex[(TD_KEY_MATERIAL_BYTES * 2) + 1];
+    char rdma_device[TD_HOST_BYTES];
+    int rdma_gid_index;
+    char listen_host[TD_HOST_BYTES];
+    int listen_port;
+    int node_id;
+    char memory_file[TD_PATH_BYTES];
+    size_t prime_slots;
+    size_t cache_slots;
+    size_t backup_slots;
+    size_t max_value_size;
+    size_t eviction_threshold_pct;
+    size_t recv_queue_depth;
+    td_endpoint_t mn_endpoints[TD_MAX_ENDPOINTS];
+    size_t mn_count;
+} td_config_t;
+
+void td_config_init_defaults(td_config_t *cfg);
+int td_config_load(const char *path, td_config_t *cfg, char *err, size_t err_len);
+
+#endif

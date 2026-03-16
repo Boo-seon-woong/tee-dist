@@ -1,0 +1,12 @@
+/bin/
+
+*.o
+*.a
+*.so
+*.log
+*.out
+*.swp
+*.tmp
+
+core
+vgcore.*
