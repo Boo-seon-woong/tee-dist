@@ -15,10 +15,13 @@ COMMON_SRCS := \
 
 all: $(BIN_DIR)/cn $(BIN_DIR)/mn
 
-$(BIN_DIR)/cn: $(COMMON_SRCS) $(SRC_DIR)/cn_main.c
+$(BIN_DIR):
+	mkdir -p $(BIN_DIR)
+
+$(BIN_DIR)/cn: $(COMMON_SRCS) $(SRC_DIR)/cn_main.c | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $(COMMON_SRCS) $(SRC_DIR)/cn_main.c $(LDLIBS)
 
-$(BIN_DIR)/mn: $(COMMON_SRCS) $(SRC_DIR)/mn_main.c
+$(BIN_DIR)/mn: $(COMMON_SRCS) $(SRC_DIR)/mn_main.c | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $(COMMON_SRCS) $(SRC_DIR)/mn_main.c $(LDLIBS)
 
 clean:
