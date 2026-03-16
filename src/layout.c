@@ -31,29 +31,39 @@ int td_region_open(td_local_region_t *region, const td_config_t *cfg, char *err,
     void *mapped;
 
     memset(region, 0, sizeof(*region));
-    region->fd = open(cfg->memory_file, O_RDWR | O_CREAT, 0600);
-    if (region->fd < 0) {
-        td_format_error(err, err_len, "cannot open backing file %s", cfg->memory_file);
-        return -1;
+    region->fd = -1;
+
+    if (cfg->transport == TD_TRANSPORT_RDMA) {
+        mapped = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        region->anonymous_mapping = 1;
+        snprintf(region->backing_path, sizeof(region->backing_path), "%s", "[anonymous-shm]");
+    } else {
+        region->fd = open(cfg->memory_file, O_RDWR | O_CREAT, 0600);
+        if (region->fd < 0) {
+            td_format_error(err, err_len, "cannot open backing file %s", cfg->memory_file);
+            return -1;
+        }
+        if (ftruncate(region->fd, (off_t)bytes) != 0) {
+            td_format_error(err, err_len, "cannot size backing file %s", cfg->memory_file);
+            close(region->fd);
+            region->fd = -1;
+            return -1;
+        }
+        mapped = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, region->fd, 0);
+        snprintf(region->backing_path, sizeof(region->backing_path), "%s", cfg->memory_file);
     }
-    if (ftruncate(region->fd, (off_t)bytes) != 0) {
-        td_format_error(err, err_len, "cannot size backing file %s", cfg->memory_file);
-        close(region->fd);
-        region->fd = -1;
-        return -1;
-    }
-    mapped = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, region->fd, 0);
     if (mapped == MAP_FAILED) {
-        td_format_error(err, err_len, "mmap failed for %s", cfg->memory_file);
-        close(region->fd);
-        region->fd = -1;
+        td_format_error(err, err_len, "mmap failed for %s", region->anonymous_mapping ? "[anonymous-shm]" : cfg->memory_file);
+        if (region->fd >= 0) {
+            close(region->fd);
+            region->fd = -1;
+        }
         return -1;
     }
 
     region->base = mapped;
     region->mapped_bytes = bytes;
     region->header = (td_region_header_t *)mapped;
-    snprintf(region->backing_path, sizeof(region->backing_path), "%s", cfg->memory_file);
     pthread_mutex_init(&region->lock, NULL);
 
     memset(region->base, 0, bytes);

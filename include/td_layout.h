@@ -35,6 +35,7 @@ typedef struct {
     void *base;
     size_t mapped_bytes;
     int fd;
+    int anonymous_mapping;
     char backing_path[TD_PATH_BYTES];
     td_region_header_t *header;
     pthread_mutex_t lock;
