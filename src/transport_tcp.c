@@ -22,6 +22,10 @@ typedef struct {
     volatile sig_atomic_t *stop_flag;
 } td_tcp_conn_ctx_t;
 
+static uint64_t td_tcp_profile_begin(td_session_t *session) {
+    return session != NULL && session->transport_profile != NULL ? td_now_ns() : 0;
+}
+
 static int td_send_all(int fd, const void *buf, size_t len) {
     const unsigned char *cursor = (const unsigned char *)buf;
     while (len > 0) {
@@ -57,18 +61,29 @@ static int td_recv_all(int fd, void *buf, size_t len) {
     return 0;
 }
 
-static int td_tcp_exchange(int fd, const td_wire_msg_t *request, const void *payload, td_wire_msg_t *response, void *response_payload) {
+static int td_tcp_exchange(td_session_t *session, int fd, const td_wire_msg_t *request, const void *payload, td_wire_msg_t *response, void *response_payload, uint64_t *send_ns, uint64_t *wait_ns) {
+    uint64_t start_ns;
+
+    start_ns = td_tcp_profile_begin(session);
     if (td_send_all(fd, request, sizeof(*request)) != 0) {
         return -1;
     }
     if (payload != NULL && request->length > 0 && td_send_all(fd, payload, (size_t)request->length) != 0) {
         return -1;
     }
+    if (send_ns != NULL && start_ns != 0) {
+        *send_ns += td_now_ns() - start_ns;
+    }
+
+    start_ns = td_tcp_profile_begin(session);
     if (td_recv_all(fd, response, sizeof(*response)) != 0) {
         return -1;
     }
     if (response_payload != NULL && response->length > 0 && td_recv_all(fd, response_payload, (size_t)response->length) != 0) {
         return -1;
+    }
+    if (wait_ns != NULL && start_ns != 0) {
+        *wait_ns += td_now_ns() - start_ns;
     }
     return 0;
 }
@@ -77,6 +92,8 @@ static int td_tcp_client_read(td_session_t *session, size_t offset, void *buf, s
     td_tcp_impl_t *impl = (td_tcp_impl_t *)session->impl;
     td_wire_msg_t request;
     td_wire_msg_t response;
+    uint64_t send_ns = 0;
+    uint64_t wait_ns = 0;
 
     memset(&request, 0, sizeof(request));
     request.magic = TD_WIRE_MAGIC;
@@ -84,9 +101,13 @@ static int td_tcp_client_read(td_session_t *session, size_t offset, void *buf, s
     request.offset = offset;
     request.length = len;
 
-    if (td_tcp_exchange(impl->fd, &request, NULL, &response, buf) != 0 || response.status != 0) {
+    if (td_tcp_exchange(session, impl->fd, &request, NULL, &response, buf, &send_ns, &wait_ns) != 0 || response.status != 0) {
         td_format_error(err, err_len, "tcp read failed for node %d", session->endpoint.node_id);
         return -1;
+    }
+    if (session->transport_profile != NULL) {
+        session->transport_profile->read_send_ns += send_ns;
+        session->transport_profile->read_wait_ns += wait_ns;
     }
     return 0;
 }
@@ -95,6 +116,8 @@ static int td_tcp_client_write(td_session_t *session, size_t offset, const void 
     td_tcp_impl_t *impl = (td_tcp_impl_t *)session->impl;
     td_wire_msg_t request;
     td_wire_msg_t response;
+    uint64_t send_ns = 0;
+    uint64_t wait_ns = 0;
 
     memset(&request, 0, sizeof(request));
     request.magic = TD_WIRE_MAGIC;
@@ -102,9 +125,13 @@ static int td_tcp_client_write(td_session_t *session, size_t offset, const void 
     request.offset = offset;
     request.length = len;
 
-    if (td_tcp_exchange(impl->fd, &request, buf, &response, NULL) != 0 || response.status != 0) {
+    if (td_tcp_exchange(session, impl->fd, &request, buf, &response, NULL, &send_ns, &wait_ns) != 0 || response.status != 0) {
         td_format_error(err, err_len, "tcp write failed for node %d", session->endpoint.node_id);
         return -1;
+    }
+    if (session->transport_profile != NULL) {
+        session->transport_profile->write_send_ns += send_ns;
+        session->transport_profile->write_wait_ns += wait_ns;
     }
     return 0;
 }
@@ -113,6 +140,8 @@ static int td_tcp_client_cas(td_session_t *session, size_t offset, uint64_t comp
     td_tcp_impl_t *impl = (td_tcp_impl_t *)session->impl;
     td_wire_msg_t request;
     td_wire_msg_t response;
+    uint64_t send_ns = 0;
+    uint64_t wait_ns = 0;
 
     memset(&request, 0, sizeof(request));
     request.magic = TD_WIRE_MAGIC;
@@ -121,11 +150,15 @@ static int td_tcp_client_cas(td_session_t *session, size_t offset, uint64_t comp
     request.compare = compare;
     request.swap = swap;
 
-    if (td_tcp_exchange(impl->fd, &request, NULL, &response, NULL) != 0 || response.status != 0) {
+    if (td_tcp_exchange(session, impl->fd, &request, NULL, &response, NULL, &send_ns, &wait_ns) != 0 || response.status != 0) {
         td_format_error(err, err_len, "tcp cas failed for node %d", session->endpoint.node_id);
         return -1;
     }
     *old_value = response.compare;
+    if (session->transport_profile != NULL) {
+        session->transport_profile->cas_send_ns += send_ns;
+        session->transport_profile->cas_wait_ns += wait_ns;
+    }
     return 0;
 }
 
@@ -133,14 +166,20 @@ static int td_tcp_client_control(td_session_t *session, td_wire_op_t op, char *e
     td_tcp_impl_t *impl = (td_tcp_impl_t *)session->impl;
     td_wire_msg_t request;
     td_wire_msg_t response;
+    uint64_t send_ns = 0;
+    uint64_t wait_ns = 0;
 
     memset(&request, 0, sizeof(request));
     request.magic = TD_WIRE_MAGIC;
     request.op = (uint16_t)op;
 
-    if (td_tcp_exchange(impl->fd, &request, NULL, &response, NULL) != 0 || response.status != 0) {
+    if (td_tcp_exchange(session, impl->fd, &request, NULL, &response, NULL, &send_ns, &wait_ns) != 0 || response.status != 0) {
         td_format_error(err, err_len, "tcp control op %u failed", (unsigned int)op);
         return -1;
+    }
+    if (session->transport_profile != NULL) {
+        session->transport_profile->control_send_ns += send_ns;
+        session->transport_profile->control_wait_ns += wait_ns;
     }
     return 0;
 }
@@ -206,7 +245,7 @@ int td_tcp_client_connect(td_session_t *session, const td_endpoint_t *endpoint, 
     hello.magic = TD_WIRE_MAGIC;
     hello.op = TD_WIRE_HELLO;
 
-    if (td_tcp_exchange(fd, &hello, NULL, &response, NULL) != 0 || response.status != 0) {
+    if (td_tcp_exchange(NULL, fd, &hello, NULL, &response, NULL, NULL, NULL) != 0 || response.status != 0) {
         close(fd);
         free(impl);
         td_format_error(err, err_len, "tcp hello failed with %s:%d", endpoint->host, endpoint->port);

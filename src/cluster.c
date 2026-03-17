@@ -41,6 +41,14 @@ static double td_ns_to_us(uint64_t ns) {
     return (double)ns / 1000.0;
 }
 
+static void td_cluster_attach_transport_profile(td_cluster_t *cluster, td_transport_profile_t *transport_profile) {
+    size_t idx;
+
+    for (idx = 0; idx < cluster->session_count; ++idx) {
+        cluster->sessions[idx].transport_profile = transport_profile;
+    }
+}
+
 static int td_slot_is_empty(const td_slot_t *slot) {
     return slot->guard_epoch == 0 &&
            slot->visible_epoch == 0 &&
@@ -516,7 +524,11 @@ int td_cluster_delete_kv(td_cluster_t *cluster, const char *key, int *rule_out, 
 
 int td_cluster_read_kv_profiled(td_cluster_t *cluster, const char *key, unsigned char *value, size_t *value_len, int *found, td_latency_profile_t *profile, char *err, size_t err_len) {
     uint64_t start_ns = td_profile_begin(profile);
-    int rc = td_cluster_read_value(cluster, key, value, value_len, found, profile, err, err_len);
+    int rc;
+
+    td_cluster_attach_transport_profile(cluster, profile != NULL ? &profile->transport_profile : NULL);
+    rc = td_cluster_read_value(cluster, key, value, value_len, found, profile, err, err_len);
+    td_cluster_attach_transport_profile(cluster, NULL);
 
     if (profile != NULL && start_ns != 0) {
         profile->total_ns = td_now_ns() - start_ns;
@@ -526,7 +538,11 @@ int td_cluster_read_kv_profiled(td_cluster_t *cluster, const char *key, unsigned
 
 int td_cluster_write_kv_profiled(td_cluster_t *cluster, const char *key, const unsigned char *value, size_t value_len, int *rule_out, td_latency_profile_t *profile, char *err, size_t err_len) {
     uint64_t start_ns = td_profile_begin(profile);
-    int rule = td_cluster_write_value(cluster, key, value, value_len, 0, 0, profile, err, err_len);
+    int rule;
+
+    td_cluster_attach_transport_profile(cluster, profile != NULL ? &profile->transport_profile : NULL);
+    rule = td_cluster_write_value(cluster, key, value, value_len, 0, 0, profile, err, err_len);
+    td_cluster_attach_transport_profile(cluster, NULL);
 
     if (profile != NULL && start_ns != 0) {
         profile->total_ns = td_now_ns() - start_ns;
@@ -542,7 +558,11 @@ int td_cluster_write_kv_profiled(td_cluster_t *cluster, const char *key, const u
 
 int td_cluster_update_kv_profiled(td_cluster_t *cluster, const char *key, const unsigned char *value, size_t value_len, int *rule_out, td_latency_profile_t *profile, char *err, size_t err_len) {
     uint64_t start_ns = td_profile_begin(profile);
-    int rule = td_cluster_write_value(cluster, key, value, value_len, 1, 0, profile, err, err_len);
+    int rule;
+
+    td_cluster_attach_transport_profile(cluster, profile != NULL ? &profile->transport_profile : NULL);
+    rule = td_cluster_write_value(cluster, key, value, value_len, 1, 0, profile, err, err_len);
+    td_cluster_attach_transport_profile(cluster, NULL);
 
     if (profile != NULL && start_ns != 0) {
         profile->total_ns = td_now_ns() - start_ns;
@@ -558,7 +578,11 @@ int td_cluster_update_kv_profiled(td_cluster_t *cluster, const char *key, const 
 
 int td_cluster_delete_kv_profiled(td_cluster_t *cluster, const char *key, int *rule_out, td_latency_profile_t *profile, char *err, size_t err_len) {
     uint64_t start_ns = td_profile_begin(profile);
-    int rule = td_cluster_write_value(cluster, key, (const unsigned char *)"", 0, 0, 1, profile, err, err_len);
+    int rule;
+
+    td_cluster_attach_transport_profile(cluster, profile != NULL ? &profile->transport_profile : NULL);
+    rule = td_cluster_write_value(cluster, key, (const unsigned char *)"", 0, 0, 1, profile, err, err_len);
+    td_cluster_attach_transport_profile(cluster, NULL);
 
     if (profile != NULL && start_ns != 0) {
         profile->total_ns = td_now_ns() - start_ns;
@@ -651,40 +675,74 @@ static void td_print_latency_line(FILE *out, const char *label, uint64_t ns, uin
     fprintf(out, "latency.%s_us=%.2f (%.1f%%)\n", label, td_ns_to_us(ns), total_ns == 0 ? 0.0 : ((double)ns * 100.0) / (double)total_ns);
 }
 
+static void td_print_latency_value(FILE *out, const char *label, uint64_t ns) {
+    if (ns == 0) {
+        return;
+    }
+    fprintf(out, "latency.%s_us=%.2f\n", label, td_ns_to_us(ns));
+}
+
 static void td_print_latency_profile(FILE *out, const td_latency_profile_t *profile) {
-    uint64_t transport_read_ns = profile->prime_probe_ns + profile->cache_probe_ns + profile->backup_probe_ns + profile->repair_probe_ns + profile->refresh_cache_probe_ns;
-    uint64_t transport_write_ns = profile->backup_write_ns + profile->primary_write_ns + profile->repair_write_ns + profile->refresh_cache_write_ns;
-    uint64_t transport_cas_ns = profile->backup_cas_ns + profile->primary_cas_ns + profile->repair_cas_ns + profile->refresh_cache_cas_ns;
+    uint64_t accounted_ns = 0;
+    uint64_t other_ns;
 
     fprintf(out, "latency.total_us=%.2f\n", td_ns_to_us(profile->total_ns));
-    td_print_latency_line(out, "transport_read", transport_read_ns, profile->total_ns);
-    td_print_latency_line(out, "transport_write", transport_write_ns, profile->total_ns);
-    td_print_latency_line(out, "transport_cas", transport_cas_ns, profile->total_ns);
     td_print_latency_line(out, "hash", profile->hash_ns, profile->total_ns);
-    td_print_latency_line(out, "prime_probe", profile->prime_probe_ns, profile->total_ns);
-    td_print_latency_line(out, "cache_probe", profile->cache_probe_ns, profile->total_ns);
-    td_print_latency_line(out, "cache_decode", profile->cache_decode_ns, profile->total_ns);
-    td_print_latency_line(out, "prime_decode", profile->prime_decode_ns, profile->total_ns);
-    td_print_latency_line(out, "crypto_encode", profile->crypto_encode_ns, profile->total_ns);
+    accounted_ns += profile->hash_ns;
+    td_print_latency_line(out, "transport_read_send", profile->transport_profile.read_send_ns, profile->total_ns);
+    accounted_ns += profile->transport_profile.read_send_ns;
+    td_print_latency_line(out, "transport_read_wait", profile->transport_profile.read_wait_ns, profile->total_ns);
+    accounted_ns += profile->transport_profile.read_wait_ns;
+    td_print_latency_line(out, "transport_read_copy", profile->transport_profile.read_copy_ns, profile->total_ns);
+    accounted_ns += profile->transport_profile.read_copy_ns;
+    td_print_latency_line(out, "transport_write_copy", profile->transport_profile.write_copy_ns, profile->total_ns);
+    accounted_ns += profile->transport_profile.write_copy_ns;
+    td_print_latency_line(out, "transport_write_send", profile->transport_profile.write_send_ns, profile->total_ns);
+    accounted_ns += profile->transport_profile.write_send_ns;
+    td_print_latency_line(out, "transport_write_wait", profile->transport_profile.write_wait_ns, profile->total_ns);
+    accounted_ns += profile->transport_profile.write_wait_ns;
+    td_print_latency_line(out, "transport_cas_send", profile->transport_profile.cas_send_ns, profile->total_ns);
+    accounted_ns += profile->transport_profile.cas_send_ns;
+    td_print_latency_line(out, "transport_cas_wait", profile->transport_profile.cas_wait_ns, profile->total_ns);
+    accounted_ns += profile->transport_profile.cas_wait_ns;
+    td_print_latency_line(out, "transport_control_send", profile->transport_profile.control_send_ns, profile->total_ns);
+    accounted_ns += profile->transport_profile.control_send_ns;
+    td_print_latency_line(out, "transport_control_wait", profile->transport_profile.control_wait_ns, profile->total_ns);
+    accounted_ns += profile->transport_profile.control_wait_ns;
     td_print_latency_line(out, "crypto_slot_hash", profile->crypto_slot_hash_ns, profile->total_ns);
+    accounted_ns += profile->crypto_slot_hash_ns;
     td_print_latency_line(out, "crypto_tie_breaker", profile->crypto_tie_breaker_ns, profile->total_ns);
+    accounted_ns += profile->crypto_tie_breaker_ns;
     td_print_latency_line(out, "crypto_iv", profile->crypto_iv_ns, profile->total_ns);
+    accounted_ns += profile->crypto_iv_ns;
     td_print_latency_line(out, "crypto_encrypt", profile->crypto_encrypt_ns, profile->total_ns);
+    accounted_ns += profile->crypto_encrypt_ns;
     td_print_latency_line(out, "crypto_mac", profile->crypto_mac_ns, profile->total_ns);
+    accounted_ns += profile->crypto_mac_ns;
     td_print_latency_line(out, "crypto_verify_mac", profile->crypto_verify_mac_ns, profile->total_ns);
+    accounted_ns += profile->crypto_verify_mac_ns;
     td_print_latency_line(out, "crypto_decrypt", profile->crypto_decrypt_ns, profile->total_ns);
-    td_print_latency_line(out, "backup_probe", profile->backup_probe_ns, profile->total_ns);
-    td_print_latency_line(out, "backup_write", profile->backup_write_ns, profile->total_ns);
-    td_print_latency_line(out, "backup_cas", profile->backup_cas_ns, profile->total_ns);
+    accounted_ns += profile->crypto_decrypt_ns;
     td_print_latency_line(out, "rule_eval", profile->rule_eval_ns, profile->total_ns);
-    td_print_latency_line(out, "primary_write", profile->primary_write_ns, profile->total_ns);
-    td_print_latency_line(out, "primary_cas", profile->primary_cas_ns, profile->total_ns);
-    td_print_latency_line(out, "repair_probe", profile->repair_probe_ns, profile->total_ns);
-    td_print_latency_line(out, "repair_write", profile->repair_write_ns, profile->total_ns);
-    td_print_latency_line(out, "repair_cas", profile->repair_cas_ns, profile->total_ns);
-    td_print_latency_line(out, "cache_refresh_probe", profile->refresh_cache_probe_ns, profile->total_ns);
-    td_print_latency_line(out, "cache_refresh_write", profile->refresh_cache_write_ns, profile->total_ns);
-    td_print_latency_line(out, "cache_refresh_cas", profile->refresh_cache_cas_ns, profile->total_ns);
+    accounted_ns += profile->rule_eval_ns;
+    other_ns = profile->total_ns > accounted_ns ? profile->total_ns - accounted_ns : 0;
+    td_print_latency_line(out, "other", other_ns, profile->total_ns);
+    td_print_latency_value(out, "workload_prime_probe", profile->prime_probe_ns);
+    td_print_latency_value(out, "workload_cache_probe", profile->cache_probe_ns);
+    td_print_latency_value(out, "workload_cache_decode", profile->cache_decode_ns);
+    td_print_latency_value(out, "workload_prime_decode", profile->prime_decode_ns);
+    td_print_latency_value(out, "workload_crypto_encode", profile->crypto_encode_ns);
+    td_print_latency_value(out, "workload_backup_probe", profile->backup_probe_ns);
+    td_print_latency_value(out, "workload_backup_write", profile->backup_write_ns);
+    td_print_latency_value(out, "workload_backup_cas", profile->backup_cas_ns);
+    td_print_latency_value(out, "workload_primary_write", profile->primary_write_ns);
+    td_print_latency_value(out, "workload_primary_cas", profile->primary_cas_ns);
+    td_print_latency_value(out, "workload_repair_probe", profile->repair_probe_ns);
+    td_print_latency_value(out, "workload_repair_write", profile->repair_write_ns);
+    td_print_latency_value(out, "workload_repair_cas", profile->repair_cas_ns);
+    td_print_latency_value(out, "workload_cache_refresh_probe", profile->refresh_cache_probe_ns);
+    td_print_latency_value(out, "workload_cache_refresh_write", profile->refresh_cache_write_ns);
+    td_print_latency_value(out, "workload_cache_refresh_cas", profile->refresh_cache_cas_ns);
     fprintf(out, "latency.cache enabled=%s hit=%s\n",
         profile->cache_enabled ? "yes" : "no",
         profile->cache_hit ? "yes" : "no");

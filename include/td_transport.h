@@ -31,6 +31,19 @@ typedef struct {
 
 struct td_session;
 
+typedef struct {
+    uint64_t read_send_ns;
+    uint64_t read_wait_ns;
+    uint64_t read_copy_ns;
+    uint64_t write_copy_ns;
+    uint64_t write_send_ns;
+    uint64_t write_wait_ns;
+    uint64_t cas_send_ns;
+    uint64_t cas_wait_ns;
+    uint64_t control_send_ns;
+    uint64_t control_wait_ns;
+} td_transport_profile_t;
+
 typedef int (*td_read_fn)(struct td_session *session, size_t offset, void *buf, size_t len, char *err, size_t err_len);
 typedef int (*td_write_fn)(struct td_session *session, size_t offset, const void *buf, size_t len, char *err, size_t err_len);
 typedef int (*td_cas_fn)(struct td_session *session, size_t offset, uint64_t compare, uint64_t swap, uint64_t *old_value, char *err, size_t err_len);
@@ -45,6 +58,7 @@ typedef struct td_session {
     td_region_header_t header;
     size_t region_size;
     void *impl;
+    td_transport_profile_t *transport_profile;
     td_read_fn read_region;
     td_write_fn write_region;
     td_cas_fn cas64;

@@ -12,6 +12,7 @@ typedef struct {
 
 typedef struct {
     uint64_t total_ns;
+    td_transport_profile_t transport_profile;
     uint64_t hash_ns;
     uint64_t prime_probe_ns;
     uint64_t cache_probe_ns;
