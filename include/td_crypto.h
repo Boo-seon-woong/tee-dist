@@ -12,9 +12,14 @@ typedef struct {
     uint64_t slot_hash_ns;
     uint64_t tie_breaker_ns;
     uint64_t iv_ns;
+    uint64_t mac_setup_ns;
+    uint64_t mac_body_ns;
+    uint64_t mac_finalize_ns;
+    uint64_t encrypt_setup_ns;
     uint64_t mac_ns;
     uint64_t verify_mac_ns;
     uint64_t encrypt_ns;
+    uint64_t decrypt_setup_ns;
     uint64_t decrypt_ns;
 } td_crypto_profile_t;
 

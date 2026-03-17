@@ -47,6 +47,10 @@ REPL 명령:
 - `update key value`
 - `delete key`
 - `read key -t`, `write key value -t`, `update key value -t`, `delete key -t`로 단계별 latency breakdown 출력
+  - transport별 세부 항목: `tcp_*` 또는 `rdma_*`
+  - workload 세부 항목: `workload_snapshot_*`, `workload_cache_*`, `workload_prime_*`
+  - probe 통계: `probe_reads`, `probe_slots`, `probe_guard_mismatch`, `probe_tombstones`, `probe_empty`
+  - server-side raw timing: `tcp_server_*`, `rdma_server_*`
 - `status`
 - `evict`
 - `quit`

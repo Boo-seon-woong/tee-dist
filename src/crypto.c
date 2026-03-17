@@ -23,29 +23,45 @@ static void td_sha256_two_parts(const unsigned char *a, size_t a_len, const unsi
     SHA256_Final(out, &ctx);
 }
 
-static int td_crypto_mac(const td_crypto_ctx_t *ctx, const td_slot_t *slot, unsigned char out[32], uint64_t *latency_ns) {
+static int td_crypto_mac(const td_crypto_ctx_t *ctx, const td_slot_t *slot, unsigned char out[32], uint64_t *latency_ns, td_crypto_profile_t *profile) {
     unsigned int out_len = 0;
-    HMAC_CTX *hctx = HMAC_CTX_new();
-    uint64_t start_ns = latency_ns != NULL ? td_now_ns() : 0;
+    HMAC_CTX *hctx;
+    uint64_t total_start_ns = latency_ns != NULL ? td_now_ns() : 0;
+    uint64_t start_ns;
 
+    start_ns = td_crypto_profile_begin(profile);
+    hctx = HMAC_CTX_new();
     if (hctx == NULL) {
         return -1;
     }
-    if (HMAC_Init_ex(hctx, ctx->mac_key, sizeof(ctx->mac_key), EVP_sha256(), NULL) != 1 ||
-        HMAC_Update(hctx, (const unsigned char *)&slot->key_hash, sizeof(slot->key_hash)) != 1 ||
+    if (HMAC_Init_ex(hctx, ctx->mac_key, sizeof(ctx->mac_key), EVP_sha256(), NULL) != 1) {
+        HMAC_CTX_free(hctx);
+        return -1;
+    }
+    td_crypto_profile_end(profile, start_ns, profile != NULL ? &profile->mac_setup_ns : NULL);
+
+    start_ns = td_crypto_profile_begin(profile);
+    if (HMAC_Update(hctx, (const unsigned char *)&slot->key_hash, sizeof(slot->key_hash)) != 1 ||
         HMAC_Update(hctx, (const unsigned char *)&slot->visible_epoch, sizeof(slot->visible_epoch)) != 1 ||
         HMAC_Update(hctx, (const unsigned char *)&slot->tie_breaker, sizeof(slot->tie_breaker)) != 1 ||
         HMAC_Update(hctx, (const unsigned char *)&slot->flags, sizeof(slot->flags)) != 1 ||
         HMAC_Update(hctx, (const unsigned char *)&slot->value_len, sizeof(slot->value_len)) != 1 ||
         HMAC_Update(hctx, slot->iv, sizeof(slot->iv)) != 1 ||
-        HMAC_Update(hctx, slot->ciphertext, slot->value_len) != 1 ||
-        HMAC_Final(hctx, out, &out_len) != 1) {
+        HMAC_Update(hctx, slot->ciphertext, slot->value_len) != 1) {
+        HMAC_CTX_free(hctx);
+        return -1;
+    }
+    td_crypto_profile_end(profile, start_ns, profile != NULL ? &profile->mac_body_ns : NULL);
+
+    start_ns = td_crypto_profile_begin(profile);
+    if (HMAC_Final(hctx, out, &out_len) != 1) {
         HMAC_CTX_free(hctx);
         return -1;
     }
     HMAC_CTX_free(hctx);
-    if (latency_ns != NULL && start_ns != 0) {
-        *latency_ns += td_now_ns() - start_ns;
+    td_crypto_profile_end(profile, start_ns, profile != NULL ? &profile->mac_finalize_ns : NULL);
+    if (latency_ns != NULL && total_start_ns != 0) {
+        *latency_ns += td_now_ns() - total_start_ns;
     }
     return out_len == 32 ? 0 : -1;
 }
@@ -123,6 +139,7 @@ int td_crypto_make_slot_profiled(
     td_crypto_profile_end(profile, start_ns, profile != NULL ? &profile->iv_ns : NULL);
     memcpy(slot->iv, iv_seed, sizeof(slot->iv));
 
+    start_ns = td_crypto_profile_begin(profile);
     cipher = EVP_CIPHER_CTX_new();
     if (cipher == NULL) {
         return -1;
@@ -131,6 +148,7 @@ int td_crypto_make_slot_profiled(
         EVP_CIPHER_CTX_free(cipher);
         return -1;
     }
+    td_crypto_profile_end(profile, start_ns, profile != NULL ? &profile->encrypt_setup_ns : NULL);
     start_ns = td_crypto_profile_begin(profile);
     if (EVP_EncryptUpdate(cipher, slot->ciphertext, &out_len, value, (int)value_len) != 1 ||
         EVP_EncryptFinal_ex(cipher, slot->ciphertext + out_len, &tmp_len) != 1) {
@@ -141,7 +159,7 @@ int td_crypto_make_slot_profiled(
     EVP_CIPHER_CTX_free(cipher);
     slot->value_len = (uint32_t)(out_len + tmp_len);
 
-    if (td_crypto_mac(ctx, slot, slot->mac, profile != NULL ? &profile->mac_ns : NULL) != 0) {
+    if (td_crypto_mac(ctx, slot, slot->mac, profile != NULL ? &profile->mac_ns : NULL, profile) != 0) {
         return -1;
     }
     return 0;
@@ -179,7 +197,7 @@ int td_crypto_decode_slot_profiled(
     if (slot->guard_epoch != slot->visible_epoch) {
         return -1;
     }
-    if (td_crypto_mac(ctx, slot, mac, profile != NULL ? &profile->verify_mac_ns : NULL) != 0) {
+    if (td_crypto_mac(ctx, slot, mac, profile != NULL ? &profile->verify_mac_ns : NULL, profile) != 0) {
         return -1;
     }
     if (memcmp(mac, slot->mac, sizeof(mac)) != 0) {
@@ -189,13 +207,18 @@ int td_crypto_decode_slot_profiled(
         return -1;
     }
 
+    start_ns = td_crypto_profile_begin(profile);
     cipher = EVP_CIPHER_CTX_new();
     if (cipher == NULL) {
         return -1;
     }
+    if (EVP_DecryptInit_ex(cipher, EVP_aes_256_ctr(), NULL, ctx->enc_key, slot->iv) != 1) {
+        EVP_CIPHER_CTX_free(cipher);
+        return -1;
+    }
+    td_crypto_profile_end(profile, start_ns, profile != NULL ? &profile->decrypt_setup_ns : NULL);
     start_ns = td_crypto_profile_begin(profile);
-    if (EVP_DecryptInit_ex(cipher, EVP_aes_256_ctr(), NULL, ctx->enc_key, slot->iv) != 1 ||
-        EVP_DecryptUpdate(cipher, plaintext, &out_len, slot->ciphertext, (int)slot->value_len) != 1 ||
+    if (EVP_DecryptUpdate(cipher, plaintext, &out_len, slot->ciphertext, (int)slot->value_len) != 1 ||
         EVP_DecryptFinal_ex(cipher, plaintext + out_len, &tmp_len) != 1) {
         EVP_CIPHER_CTX_free(cipher);
         return -1;
