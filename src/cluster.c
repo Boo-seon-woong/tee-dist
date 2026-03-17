@@ -226,14 +226,18 @@ static int td_cluster_read_value(td_cluster_t *cluster, const char *key, unsigne
             td_slot_present(&cache_probe.slot, key_hash)) {
             start_ns = td_profile_begin(profile);
             if (td_crypto_decode_slot(&cluster->crypto, key, &cache_probe.slot, value, value_len) == 0) {
-                td_profile_end(profile, start_ns, &profile->cache_decode_ns);
+                if (profile != NULL) {
+                    td_profile_end(profile, start_ns, &profile->cache_decode_ns);
+                }
                 if (profile != NULL) {
                     profile->cache_hit = 1;
                 }
                 *found = 1;
                 return 0;
             }
-            td_profile_end(profile, start_ns, &profile->cache_decode_ns);
+            if (profile != NULL) {
+                td_profile_end(profile, start_ns, &profile->cache_decode_ns);
+            }
         }
     }
 
@@ -242,11 +246,15 @@ static int td_cluster_read_value(td_cluster_t *cluster, const char *key, unsigne
     }
     start_ns = td_profile_begin(profile);
     if (td_crypto_decode_slot(&cluster->crypto, key, &prime_probe.slot, value, value_len) != 0) {
-        td_profile_end(profile, start_ns, &profile->prime_decode_ns);
+        if (profile != NULL) {
+            td_profile_end(profile, start_ns, &profile->prime_decode_ns);
+        }
         td_format_error(err, err_len, "mac verification failed for key %s", key);
         return -1;
     }
-    td_profile_end(profile, start_ns, &profile->prime_decode_ns);
+    if (profile != NULL) {
+        td_profile_end(profile, start_ns, &profile->prime_decode_ns);
+    }
     td_refresh_cache_best_effort(cluster, key, &prime_probe.slot, profile);
     *found = 1;
     return 0;
@@ -329,11 +337,15 @@ static int td_cluster_write_value(td_cluster_t *cluster, const char *key, const 
             tombstone ? (TD_SLOT_FLAG_VALID | TD_SLOT_FLAG_TOMBSTONE) : TD_SLOT_FLAG_VALID,
             current_epoch + 1,
             &proposal) != 0) {
-        td_profile_end(profile, start_ns, &profile->crypto_encode_ns);
+        if (profile != NULL) {
+            td_profile_end(profile, start_ns, &profile->crypto_encode_ns);
+        }
         td_format_error(err, err_len, "cannot prepare encrypted slot");
         return -1;
     }
-    td_profile_end(profile, start_ns, &profile->crypto_encode_ns);
+    if (profile != NULL) {
+        td_profile_end(profile, start_ns, &profile->crypto_encode_ns);
+    }
 
     for (idx = 0; idx < backup_count; ++idx) {
         td_session_t *backup = td_replica_session(cluster, key_hash, idx + 1);
@@ -363,7 +375,9 @@ static int td_cluster_write_value(td_cluster_t *cluster, const char *key, const 
 
     start_ns = td_profile_begin(profile);
     rule = td_evaluate_votes(votes, backup_count, proposal.tie_breaker);
-    td_profile_end(profile, start_ns, &profile->rule_eval_ns);
+    if (profile != NULL) {
+        td_profile_end(profile, start_ns, &profile->rule_eval_ns);
+    }
     if (rule == 0) {
         (void)td_wait_for_primary_change(cluster, key_hash, current_epoch);
         td_format_error(err, err_len, "snapshot consensus lost for key %s", key);
