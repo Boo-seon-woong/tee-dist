@@ -46,6 +46,7 @@ REPL 명령:
 - `write key value`
 - `update key value`
 - `delete key`
+- `read key -t`, `write key value -t`, `update key value -t`, `delete key -t`로 단계별 latency breakdown 출력
 - `status`
 - `evict`
 - `quit`
