@@ -1,6 +1,9 @@
 #include "td_config.h"
+#include "td_layout.h"
 
+#include <errno.h>
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +56,196 @@ static char *td_normalize_value(char *value) {
     return td_trim(value);
 }
 
+static int td_parse_size_literal(const char *text, size_t *out) {
+    char *end = NULL;
+    unsigned long long value;
+
+    errno = 0;
+    value = strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || value > (unsigned long long)SIZE_MAX) {
+        return -1;
+    }
+    *out = (size_t)value;
+    return 0;
+}
+
+static int td_parse_size_bytes(const char *text, size_t *out) {
+    char number[64];
+    char unit[8];
+    size_t text_len = strlen(text);
+    size_t pos = 0;
+    size_t number_len = 0;
+    size_t unit_len = 0;
+    unsigned long long magnitude;
+    unsigned long long multiplier = 0;
+    char *end = NULL;
+
+    if (text_len == 0) {
+        return -1;
+    }
+
+    while (pos < text_len && isdigit((unsigned char)text[pos])) {
+        if (number_len + 1 >= sizeof(number)) {
+            return -1;
+        }
+        number[number_len++] = text[pos++];
+    }
+    number[number_len] = '\0';
+
+    while (pos < text_len && isspace((unsigned char)text[pos])) {
+        ++pos;
+    }
+    while (pos < text_len && isalpha((unsigned char)text[pos])) {
+        if (unit_len + 1 >= sizeof(unit)) {
+            return -1;
+        }
+        unit[unit_len++] = (char)tolower((unsigned char)text[pos++]);
+    }
+    unit[unit_len] = '\0';
+
+    while (pos < text_len && isspace((unsigned char)text[pos])) {
+        ++pos;
+    }
+    if (number_len == 0 || unit_len == 0 || pos != text_len) {
+        return -1;
+    }
+
+    errno = 0;
+    magnitude = strtoull(number, &end, 10);
+    if (errno != 0 || end == number || *end != '\0') {
+        return -1;
+    }
+
+    if (strcmp(unit, "b") == 0) {
+        multiplier = 1ULL;
+    } else if (strcmp(unit, "kb") == 0) {
+        multiplier = 1024ULL;
+    } else if (strcmp(unit, "mb") == 0) {
+        multiplier = 1024ULL * 1024ULL;
+    } else if (strcmp(unit, "gb") == 0) {
+        multiplier = 1024ULL * 1024ULL * 1024ULL;
+    } else {
+        return -1;
+    }
+
+    if (magnitude > ((unsigned long long)SIZE_MAX / multiplier)) {
+        return -1;
+    }
+    *out = (size_t)(magnitude * multiplier);
+    return 0;
+}
+
+static void td_allocate_weighted_slots(td_config_t *cfg, size_t remaining_slots) {
+    typedef struct {
+        size_t *slots;
+        int explicit;
+        size_t weight;
+        size_t remainder;
+        int priority;
+    } td_slot_bucket_t;
+
+    td_slot_bucket_t buckets[3];
+    size_t weight_sum = 0;
+    size_t allocated = 0;
+    size_t idx;
+
+    buckets[0].slots = &cfg->prime_slots;
+    buckets[0].explicit = cfg->prime_slots_explicit;
+    buckets[0].weight = 4;
+    buckets[0].remainder = 0;
+    buckets[0].priority = 0;
+    buckets[1].slots = &cfg->cache_slots;
+    buckets[1].explicit = cfg->cache_slots_explicit;
+    buckets[1].weight = 1;
+    buckets[1].remainder = 0;
+    buckets[1].priority = 1;
+    buckets[2].slots = &cfg->backup_slots;
+    buckets[2].explicit = cfg->backup_slots_explicit;
+    buckets[2].weight = 4;
+    buckets[2].remainder = 0;
+    buckets[2].priority = 2;
+
+    for (idx = 0; idx < 3; ++idx) {
+        if (!buckets[idx].explicit) {
+            weight_sum += buckets[idx].weight;
+            *buckets[idx].slots = 0;
+        }
+    }
+    if (weight_sum == 0 || remaining_slots == 0) {
+        return;
+    }
+
+    for (idx = 0; idx < 3; ++idx) {
+        if (!buckets[idx].explicit) {
+            *buckets[idx].slots += (remaining_slots * buckets[idx].weight) / weight_sum;
+            buckets[idx].remainder = (remaining_slots * buckets[idx].weight) % weight_sum;
+            allocated += *buckets[idx].slots;
+        }
+    }
+
+    while (allocated < remaining_slots) {
+        size_t best = 3;
+        for (idx = 0; idx < 3; ++idx) {
+            if (buckets[idx].explicit) {
+                continue;
+            }
+            if (best == 3 ||
+                buckets[idx].remainder > buckets[best].remainder ||
+                (buckets[idx].remainder == buckets[best].remainder &&
+                    buckets[idx].priority < buckets[best].priority)) {
+                best = idx;
+            }
+        }
+        if (best == 3) {
+            break;
+        }
+        ++(*buckets[best].slots);
+        buckets[best].remainder = 0;
+        ++allocated;
+    }
+}
+
+static int td_resolve_mn_slots(td_config_t *cfg, char *err, size_t err_len) {
+    size_t header_bytes = sizeof(td_region_header_t);
+    size_t slot_bytes = sizeof(td_slot_t);
+    size_t capacity_slots;
+    size_t manual_slots;
+    size_t remaining_slots;
+
+    if (cfg->mn_memory_size <= header_bytes) {
+        td_format_error(err, err_len, "mn_memory_size must be larger than %zu bytes", header_bytes);
+        return -1;
+    }
+
+    capacity_slots = (cfg->mn_memory_size - header_bytes) / slot_bytes;
+    if (capacity_slots == 0) {
+        td_format_error(err, err_len, "mn_memory_size is too small to fit any slots");
+        return -1;
+    }
+
+    manual_slots = cfg->prime_slots + cfg->cache_slots + cfg->backup_slots;
+    if (manual_slots > capacity_slots) {
+        td_format_error(err, err_len,
+            "configured slots need %zu bytes but mn_memory_size is %zu bytes",
+            header_bytes + (manual_slots * slot_bytes),
+            cfg->mn_memory_size);
+        return -1;
+    }
+
+    remaining_slots = capacity_slots - manual_slots;
+    td_allocate_weighted_slots(cfg, remaining_slots);
+
+    if (cfg->prime_slots == 0) {
+        td_format_error(err, err_len, "resolved prime_slots is zero; increase mn_memory_size or set prime_slots");
+        return -1;
+    }
+    if (cfg->replication > 1 && cfg->backup_slots == 0) {
+        td_format_error(err, err_len, "resolved backup_slots is zero; increase mn_memory_size or set backup_slots");
+        return -1;
+    }
+    return 0;
+}
+
 void td_config_init_defaults(td_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
     cfg->mode = TD_MODE_CN;
@@ -60,13 +253,10 @@ void td_config_init_defaults(td_config_t *cfg) {
     cfg->replication = 3;
     cfg->tdx = TD_TDX_OFF;
     cfg->cache = TD_CACHE_ON;
-    cfg->mn_memory_size_mb = 64;
+    cfg->mn_memory_size = 64ULL * 1024ULL * 1024ULL;
     cfg->rdma_gid_index = 0;
     cfg->listen_port = 0;
     cfg->node_id = -1;
-    cfg->prime_slots = 1024;
-    cfg->cache_slots = 256;
-    cfg->backup_slots = 1024;
     cfg->max_value_size = TD_MAX_VALUE_SIZE;
     cfg->eviction_threshold_pct = 80;
     cfg->recv_queue_depth = TD_RECV_QUEUE_DEPTH;
@@ -139,8 +329,12 @@ int td_config_load(const char *path, td_config_t *cfg, char *err, size_t err_len
                 return -1;
             }
             cfg->cache = toggle ? TD_CACHE_ON : TD_CACHE_OFF;
-        } else if (strcmp(key, "mn_memory_size_mb") == 0) {
-            cfg->mn_memory_size_mb = (size_t)strtoull(value, NULL, 10);
+        } else if (strcmp(key, "mn_memory_size") == 0) {
+            if (td_parse_size_bytes(value, &cfg->mn_memory_size) != 0) {
+                td_format_error(err, err_len, "invalid mn_memory_size at line %zu", line_no);
+                fclose(fp);
+                return -1;
+            }
         } else if (strcmp(key, "encryption_key_hex") == 0) {
             snprintf(cfg->encryption_key_hex, sizeof(cfg->encryption_key_hex), "%s", value);
         } else if (strcmp(key, "rdma_device") == 0) {
@@ -156,11 +350,26 @@ int td_config_load(const char *path, td_config_t *cfg, char *err, size_t err_len
         } else if (strcmp(key, "memory_file") == 0) {
             snprintf(cfg->memory_file, sizeof(cfg->memory_file), "%s", value);
         } else if (strcmp(key, "prime_slots") == 0) {
-            cfg->prime_slots = (size_t)strtoull(value, NULL, 10);
+            if (td_parse_size_literal(value, &cfg->prime_slots) != 0) {
+                td_format_error(err, err_len, "invalid prime_slots at line %zu", line_no);
+                fclose(fp);
+                return -1;
+            }
+            cfg->prime_slots_explicit = 1;
         } else if (strcmp(key, "cache_slots") == 0) {
-            cfg->cache_slots = (size_t)strtoull(value, NULL, 10);
+            if (td_parse_size_literal(value, &cfg->cache_slots) != 0) {
+                td_format_error(err, err_len, "invalid cache_slots at line %zu", line_no);
+                fclose(fp);
+                return -1;
+            }
+            cfg->cache_slots_explicit = 1;
         } else if (strcmp(key, "backup_slots") == 0) {
-            cfg->backup_slots = (size_t)strtoull(value, NULL, 10);
+            if (td_parse_size_literal(value, &cfg->backup_slots) != 0) {
+                td_format_error(err, err_len, "invalid backup_slots at line %zu", line_no);
+                fclose(fp);
+                return -1;
+            }
+            cfg->backup_slots_explicit = 1;
         } else if (strcmp(key, "max_value_size") == 0) {
             cfg->max_value_size = (size_t)strtoull(value, NULL, 10);
         } else if (strcmp(key, "eviction_threshold_pct") == 0) {
@@ -198,6 +407,9 @@ int td_config_load(const char *path, td_config_t *cfg, char *err, size_t err_len
     }
     if (cfg->mode == TD_MODE_MN && cfg->listen_port <= 0) {
         td_format_error(err, err_len, "mn config requires listen_port");
+        return -1;
+    }
+    if (cfg->mode == TD_MODE_MN && td_resolve_mn_slots(cfg, err, err_len) != 0) {
         return -1;
     }
     if (cfg->encryption_key_hex[0] == '\0') {

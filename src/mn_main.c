@@ -12,6 +12,79 @@ typedef struct {
     size_t threshold_pct;
 } td_eviction_ctx_t;
 
+static void td_format_bytes(char *buf, size_t buf_len, size_t bytes) {
+    const unsigned long long gb = 1024ULL * 1024ULL * 1024ULL;
+    const unsigned long long mb = 1024ULL * 1024ULL;
+    const unsigned long long kb = 1024ULL;
+    unsigned long long value = (unsigned long long)bytes;
+
+    if (value % gb == 0) {
+        snprintf(buf, buf_len, "%lluGB", value / gb);
+    } else if (value % mb == 0) {
+        snprintf(buf, buf_len, "%lluMB", value / mb);
+    } else if (value % kb == 0) {
+        snprintf(buf, buf_len, "%lluKB", value / kb);
+    } else {
+        snprintf(buf, buf_len, "%lluB", value);
+    }
+}
+
+static const char *td_slot_layout_mode(const td_config_t *cfg) {
+    int explicit_count = 0;
+
+    explicit_count += cfg->prime_slots_explicit ? 1 : 0;
+    explicit_count += cfg->cache_slots_explicit ? 1 : 0;
+    explicit_count += cfg->backup_slots_explicit ? 1 : 0;
+    if (explicit_count == 0) {
+        return "auto";
+    }
+    if (explicit_count == 3) {
+        return "manual";
+    }
+    return "mixed";
+}
+
+static void td_print_memory_layout(const td_config_t *cfg, const td_local_region_t *region) {
+    char total_buf[32];
+    char header_buf[32];
+    char prime_buf[32];
+    char cache_buf[32];
+    char backup_buf[32];
+    char used_buf[32];
+    char unused_buf[32];
+    size_t header_bytes = sizeof(td_region_header_t);
+    size_t slot_bytes = sizeof(td_slot_t);
+    size_t prime_bytes = cfg->prime_slots * slot_bytes;
+    size_t cache_bytes = cfg->cache_slots * slot_bytes;
+    size_t backup_bytes = cfg->backup_slots * slot_bytes;
+    size_t used_bytes = header_bytes + prime_bytes + cache_bytes + backup_bytes;
+    size_t unused_bytes = region->mapped_bytes > used_bytes ? region->mapped_bytes - used_bytes : 0;
+
+    td_format_bytes(total_buf, sizeof(total_buf), region->mapped_bytes);
+    td_format_bytes(header_buf, sizeof(header_buf), header_bytes);
+    td_format_bytes(prime_buf, sizeof(prime_buf), prime_bytes);
+    td_format_bytes(cache_buf, sizeof(cache_buf), cache_bytes);
+    td_format_bytes(backup_buf, sizeof(backup_buf), backup_bytes);
+    td_format_bytes(used_buf, sizeof(used_buf), used_bytes);
+    td_format_bytes(unused_buf, sizeof(unused_buf), unused_bytes);
+
+    fprintf(stdout,
+        "tee-dist mn layout mode=%s total=%s(%llu) header=%s prime=%zu:%s cache=%zu:%s backup=%zu:%s used=%s unused=%s slot_bytes=%zu\n",
+        td_slot_layout_mode(cfg),
+        total_buf,
+        (unsigned long long)region->mapped_bytes,
+        header_buf,
+        cfg->prime_slots,
+        prime_buf,
+        cfg->cache_slots,
+        cache_buf,
+        cfg->backup_slots,
+        backup_buf,
+        used_buf,
+        unused_buf,
+        slot_bytes);
+}
+
 static void td_signal_handler(int signo) {
     (void)signo;
     td_stop = 1;
@@ -76,6 +149,7 @@ int main(int argc, char **argv) {
         cfg.listen_port,
         cfg.memory_file,
         (unsigned long long)region.mapped_bytes);
+    td_print_memory_layout(&cfg, &region);
     fflush(stdout);
 
     if (cfg.transport == TD_TRANSPORT_RDMA) {

@@ -3,13 +3,13 @@
 
 #include "td_common.h"
 
-typedef struct {
+typedef struct td_config {
     td_mode_t mode;
     td_transport_t transport;
     int replication;
     td_tdx_mode_t tdx;
     td_cache_mode_t cache;
-    size_t mn_memory_size_mb;
+    size_t mn_memory_size;
     char encryption_key_hex[(TD_KEY_MATERIAL_BYTES * 2) + 1];
     char rdma_device[TD_HOST_BYTES];
     int rdma_gid_index;
@@ -20,6 +20,9 @@ typedef struct {
     size_t prime_slots;
     size_t cache_slots;
     size_t backup_slots;
+    int prime_slots_explicit;
+    int cache_slots_explicit;
+    int backup_slots_explicit;
     size_t max_value_size;
     size_t eviction_threshold_pct;
     size_t recv_queue_depth;

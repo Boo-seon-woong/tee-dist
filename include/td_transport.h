@@ -3,6 +3,7 @@
 
 #include <signal.h>
 
+#include "td_config.h"
 #include "td_crypto.h"
 
 typedef enum {

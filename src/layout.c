@@ -1,4 +1,5 @@
 #include "td_layout.h"
+#include "td_config.h"
 
 #include <fcntl.h>
 #include <stddef.h>
@@ -22,8 +23,7 @@ size_t td_region_kind_slot_count(const td_region_header_t *header, td_region_kin
 }
 
 size_t td_region_required_bytes(const td_config_t *cfg) {
-    size_t slots = cfg->prime_slots + cfg->cache_slots + cfg->backup_slots;
-    return sizeof(td_region_header_t) + (slots * sizeof(td_slot_t));
+    return cfg->mn_memory_size;
 }
 
 int td_region_open(td_local_region_t *region, const td_config_t *cfg, char *err, size_t err_len) {

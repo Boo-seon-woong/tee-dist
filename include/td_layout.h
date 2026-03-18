@@ -3,7 +3,9 @@
 
 #include <pthread.h>
 
-#include "td_config.h"
+#include "td_common.h"
+
+typedef struct td_config td_config_t;
 
 typedef struct {
     uint64_t guard_epoch;
