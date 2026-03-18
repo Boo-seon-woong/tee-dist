@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef enum {
     TD_BENCH_WRITE = 0,
@@ -33,7 +34,18 @@ typedef struct {
     const char *phase_name;
     size_t total;
     uint64_t next_report_ns;
+    uint64_t task_start_ns;
 } td_bench_progress_t;
+
+typedef struct {
+    double min_us;
+    double max_us;
+    double typical_us;
+    double avg_us;
+    double stdev_us;
+    double p99_us;
+    double p999_us;
+} td_bench_summary_t;
 
 enum {
     TD_BENCH_PROGRESS_INTERVAL_NS = 10000000000ULL
@@ -162,10 +174,11 @@ static void td_bench_make_key(char *buf, size_t buf_len, const td_bench_options_
     }
 }
 
-static void td_bench_progress_begin(td_bench_progress_t *progress, const char *phase_name, size_t total) {
+static void td_bench_progress_begin(td_bench_progress_t *progress, const char *phase_name, size_t total, uint64_t task_start_ns) {
     progress->phase_name = phase_name;
     progress->total = total;
     progress->next_report_ns = td_now_ns() + TD_BENCH_PROGRESS_INTERVAL_NS;
+    progress->task_start_ns = task_start_ns;
 }
 
 static void td_bench_progress_maybe_report(td_bench_progress_t *progress, size_t completed) {
@@ -186,12 +199,40 @@ static void td_bench_progress_maybe_report(td_bench_progress_t *progress, size_t
     }
 }
 
+static void td_bench_format_timestamp(char *buf, size_t buf_len, time_t now) {
+    struct tm tm_now;
+
+    if (buf_len == 0) {
+        return;
+    }
+    if (localtime_r(&now, &tm_now) == NULL || strftime(buf, buf_len, "%Y-%m-%d %H:%M:%S", &tm_now) == 0) {
+        snprintf(buf, buf_len, "%lld", (long long)now);
+    }
+}
+
+static void td_bench_uppercase(char *buf, size_t buf_len, const char *text) {
+    size_t idx;
+
+    if (buf_len == 0) {
+        return;
+    }
+
+    for (idx = 0; idx + 1 < buf_len && text[idx] != '\0'; ++idx) {
+        char ch = text[idx];
+        if (ch >= 'a' && ch <= 'z') {
+            ch = (char)(ch - ('a' - 'A'));
+        }
+        buf[idx] = ch;
+    }
+    buf[idx] = '\0';
+}
+
 static int td_bench_seed_keys(td_cluster_t *cluster, const td_bench_options_t *opts, unsigned char *value, char *err, size_t err_len) {
     size_t idx;
     size_t seed_count = opts->iterations + opts->warmup_iterations;
     td_bench_progress_t progress;
 
-    td_bench_progress_begin(&progress, "seed", seed_count);
+    td_bench_progress_begin(&progress, "seed", seed_count, 0);
 
     for (idx = 0; idx < seed_count; ++idx) {
         char key[TD_KEY_BYTES];
@@ -214,7 +255,7 @@ static int td_bench_warmup(td_cluster_t *cluster, const td_bench_options_t *opts
         return 0;
     }
 
-    td_bench_progress_begin(&progress, "warmup", opts->warmup_iterations);
+    td_bench_progress_begin(&progress, "warmup", opts->warmup_iterations, 0);
 
     for (idx = 0; idx < opts->warmup_iterations; ++idx) {
         char key[TD_KEY_BYTES];
@@ -275,20 +316,17 @@ static double td_percentile_us(uint64_t *sorted_ns, size_t count, double pct) {
     return (double)sorted_ns[index] / 1000.0;
 }
 
-static void td_bench_print_stats_to(FILE *out, const td_bench_stats_t *stats) {
+static int td_bench_compute_summary(const td_bench_stats_t *stats, td_bench_summary_t *summary) {
     size_t idx;
     uint64_t min_ns;
     uint64_t max_ns;
     double avg_ns = 0.0;
     double variance = 0.0;
     double delta = 0.0;
-    double typical_us;
-    double p99_us;
-    double p999_us;
     uint64_t *sorted;
 
     if (stats->count == 0) {
-        return;
+        return -1;
     }
 
     min_ns = stats->samples_ns[0];
@@ -312,33 +350,59 @@ static void td_bench_print_stats_to(FILE *out, const td_bench_stats_t *stats) {
 
     sorted = (uint64_t *)malloc(stats->count * sizeof(*sorted));
     if (sorted == NULL) {
-        return;
+        return -1;
     }
     memcpy(sorted, stats->samples_ns, stats->count * sizeof(*sorted));
     qsort(sorted, stats->count, sizeof(*sorted), td_u64_compare);
 
-    typical_us = (double)sorted[stats->count / 2] / 1000.0;
-    p99_us = td_percentile_us(sorted, stats->count, 0.99);
-    p999_us = td_percentile_us(sorted, stats->count, 0.999);
-
-    fprintf(out, "workload #bytes #iterations    t_min[usec]    t_max[usec]  t_typical[usec]    t_avg[usec]    t_stdev[usec]   99%% percentile[usec]   99.9%% percentile[usec]\n");
-    fprintf(out, "%-8s %-6zu %-13zu %-14.2f %-12.2f %-17.2f %-14.2f %-16.2f %-22.2f %.2f\n",
-        stats->workload_name,
-        stats->bytes,
-        stats->count,
-        (double)min_ns / 1000.0,
-        (double)max_ns / 1000.0,
-        typical_us,
-        avg_ns / 1000.0,
-        sqrt(variance) / 1000.0,
-        p99_us,
-        p999_us);
+    summary->min_us = (double)min_ns / 1000.0;
+    summary->max_us = (double)max_ns / 1000.0;
+    summary->typical_us = (double)sorted[stats->count / 2] / 1000.0;
+    summary->avg_us = avg_ns / 1000.0;
+    summary->stdev_us = sqrt(variance) / 1000.0;
+    summary->p99_us = td_percentile_us(sorted, stats->count, 0.99);
+    summary->p999_us = td_percentile_us(sorted, stats->count, 0.999);
 
     free(sorted);
+    return 0;
 }
 
-static void td_bench_print_stats(const td_bench_stats_t *stats) {
-    td_bench_print_stats_to(stdout, stats);
+static void td_bench_print_stats_line(
+    FILE *out,
+    const char *label,
+    const td_bench_stats_t *stats,
+    size_t completed,
+    uint64_t elapsed_ns
+) {
+    td_bench_summary_t summary;
+    char timestamp[32];
+    char workload_upper[32];
+    time_t now = time(NULL);
+    unsigned long long elapsed_sec = (unsigned long long)(elapsed_ns / 1000000000ULL);
+
+    if (td_bench_compute_summary(stats, &summary) != 0) {
+        return;
+    }
+
+    td_bench_format_timestamp(timestamp, sizeof(timestamp), now);
+    td_bench_uppercase(workload_upper, sizeof(workload_upper), stats->workload_name);
+
+    fprintf(out,
+        "%s: %s %llu sec: %zu operations; [%s: Count=%zu Bytes=%zu Min=%.2f Max=%.2f Typical=%.2f Avg=%.2f Stdev=%.2f 99=%.2f 99.9=%.2f]\n",
+        label,
+        timestamp,
+        elapsed_sec,
+        completed,
+        workload_upper,
+        completed,
+        stats->bytes,
+        summary.min_us,
+        summary.max_us,
+        summary.typical_us,
+        summary.avg_us,
+        summary.stdev_us,
+        summary.p99_us,
+        summary.p999_us);
 }
 
 static void td_bench_progress_report_benchmark(td_bench_progress_t *progress, const td_bench_stats_t *stats, size_t completed) {
@@ -354,17 +418,28 @@ static void td_bench_progress_report_benchmark(td_bench_progress_t *progress, co
         return;
     }
 
-    fprintf(stderr, "progress: %s %zu/%zu\n", progress->phase_name, completed, progress->total);
     partial_stats = *stats;
     partial_stats.count = completed;
-    td_bench_print_stats_to(stderr, &partial_stats);
+    td_bench_print_stats_line(
+        stderr,
+        progress->phase_name,
+        &partial_stats,
+        completed,
+        progress->task_start_ns == 0 ? 0 : (now - progress->task_start_ns));
 
     while (progress->next_report_ns <= now) {
         progress->next_report_ns += TD_BENCH_PROGRESS_INTERVAL_NS;
     }
 }
 
-static int td_bench_run(td_cluster_t *cluster, const td_bench_options_t *opts, td_bench_stats_t *stats, char *err, size_t err_len) {
+static int td_bench_run(
+    td_cluster_t *cluster,
+    const td_bench_options_t *opts,
+    td_bench_stats_t *stats,
+    uint64_t task_start_ns,
+    char *err,
+    size_t err_len
+) {
     size_t idx;
     unsigned char value[TD_MAX_VALUE_SIZE];
     unsigned char read_buf[TD_MAX_VALUE_SIZE];
@@ -387,7 +462,7 @@ static int td_bench_run(td_cluster_t *cluster, const td_bench_options_t *opts, t
         return -1;
     }
 
-    td_bench_progress_begin(&progress, "benchmark", opts->iterations);
+    td_bench_progress_begin(&progress, "progress", opts->iterations, task_start_ns);
 
     for (idx = 0; idx < opts->iterations; ++idx) {
         char key[TD_KEY_BYTES];
@@ -434,6 +509,10 @@ int main(int argc, char **argv) {
     td_config_t cfg;
     td_cluster_t cluster;
     td_bench_stats_t stats;
+    uint64_t task_start_ns;
+    uint64_t task_end_ns;
+    double task_runtime_sec;
+    double task_throughput;
     char err[256];
 
     memset(&stats, 0, sizeof(stats));
@@ -453,14 +532,21 @@ int main(int argc, char **argv) {
         fprintf(stderr, "startup error: %s\n", err);
         return 1;
     }
-    if (td_bench_run(&cluster, &opts, &stats, err, sizeof(err)) != 0) {
+    task_start_ns = td_now_ns();
+    if (td_bench_run(&cluster, &opts, &stats, task_start_ns, err, sizeof(err)) != 0) {
         fprintf(stderr, "benchmark error: %s\n", err);
         free(stats.samples_ns);
         td_cluster_close(&cluster);
         return 1;
     }
+    task_end_ns = td_now_ns();
+    task_runtime_sec = (double)(task_end_ns - task_start_ns) / 1000000000.0;
+    task_throughput = task_runtime_sec > 0.0 ? (double)stats.count / task_runtime_sec : 0.0;
 
-    td_bench_print_stats(&stats);
+    td_bench_print_stats_line(stdout, "summary", &stats, stats.count, task_end_ns - task_start_ns);
+    fprintf(stdout, "Run runtime(sec): %.2f\n", task_runtime_sec);
+    fprintf(stdout, "Run operations(ops): %zu\n", stats.count);
+    fprintf(stdout, "Run throughput(ops/sec): %.2f\n", task_throughput);
     free(stats.samples_ns);
     td_cluster_close(&cluster);
     return 0;
